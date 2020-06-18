@@ -24,6 +24,7 @@
 #include <net/icmp.h>
 #include <net/udp.h>
 #include <net/inet_common.h>
+#include <net/inet_hashtables.h>
 #include <net/tcp_states.h>
 #include <net/protocol.h>
 #include <net/xfrm.h>
@@ -193,20 +194,7 @@ pass_up:
 		goto discard;
 
 	tunnel_id = ntohl(*(__be32 *) &skb->data[4]);
-	tunnel = l2tp_tunnel_find(net, tunnel_id);
-	if (tunnel) {
-		sk = tunnel->sock;
-		sock_hold(sk);
-	} else {
-		struct ipv6hdr *iph = ipv6_hdr(skb);
-
-		read_lock_bh(&l2tp_ip6_lock);
-		sk = __l2tp_ip6_bind_lookup(net, &iph->daddr,
-					    0, tunnel_id);
-		if (!sk) {
-			read_unlock_bh(&l2tp_ip6_lock);
-			goto discard;
-		}
+	iph = ipv6_hdr(skb);
 
 	read_lock_bh(&l2tp_ip6_lock);
 	sk = __l2tp_ip6_bind_lookup(net, &iph->daddr, 0, tunnel_id);
@@ -238,30 +226,15 @@ discard:
 	return 0;
 }
 
-static void l2tp_ip6_hash(struct sock *sk)
-{
-	if (sk_unhashed(sk)) {
-		write_lock_bh(&l2tp_ip6_lock);
-		sk_add_node(sk, &l2tp_ip6_table);
-		write_unlock_bh(&l2tp_ip6_lock);
-	}
-}
-
-static void l2tp_ip6_unhash(struct sock *sk)
-{
-	if (sk_unhashed(sk))
-		return;
-	write_lock_bh(&l2tp_ip6_lock);
-	sk_del_node_init(sk);
-	write_unlock_bh(&l2tp_ip6_lock);
-}
-
 static int l2tp_ip6_open(struct sock *sk)
 {
 	/* Prevent autobind. We don't have ports. */
 	inet_sk(sk)->inet_num = IPPROTO_L2TP;
 
-	l2tp_ip6_hash(sk);
+	write_lock_bh(&l2tp_ip6_lock);
+	sk_add_node(sk, &l2tp_ip6_table);
+	write_unlock_bh(&l2tp_ip6_lock);
+
 	return 0;
 }
 
@@ -316,13 +289,6 @@ static int l2tp_ip6_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	/* L2TP is point-point, not multicast */
 	if (addr_type & IPV6_ADDR_MULTICAST)
 		return -EADDRNOTAVAIL;
-
-	err = -EADDRINUSE;
-	read_lock_bh(&l2tp_ip6_lock);
-	if (__l2tp_ip6_bind_lookup(net, &addr->l2tp_addr,
-				   sk->sk_bound_dev_if, addr->l2tp_conn_id))
-		goto out_in_use;
-	read_unlock_bh(&l2tp_ip6_lock);
 
 	lock_sock(sk);
 
@@ -765,8 +731,8 @@ static struct proto l2tp_ip6_prot = {
 	.sendmsg	   = l2tp_ip6_sendmsg,
 	.recvmsg	   = l2tp_ip6_recvmsg,
 	.backlog_rcv	   = l2tp_ip6_backlog_recv,
-	.hash		   = l2tp_ip6_hash,
-	.unhash		   = l2tp_ip6_unhash,
+	.hash		   = inet_hash,
+	.unhash		   = inet_unhash,
 	.obj_size	   = sizeof(struct l2tp_ip6_sock),
 #ifdef CONFIG_COMPAT
 	.compat_setsockopt = compat_ipv6_setsockopt,
